@@ -1,0 +1,128 @@
+---
+title: "NYPD Shooting Data Report"
+author: "John Morris"
+date: "2023-12-03"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Purpose
+
+To examine a dataset provided by the City of New York on NYPD Shooting Incidents and determine if there is any trend in the times of day shootings occur at.
+
+## Libraries
+
+Tidyverse is the only library that will be required for this exercise.
+``` {r tidyverse, message=FALSE}
+library(tidyverse)
+```
+
+## Load Data
+
+First, load the CSV into a dataframe and inspect the contents.
+
+```{r load, message=FALSE}
+data_url = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+df = read_csv(data_url)
+head(df)
+```
+## Tidying
+
+The data is structured with a shooting incident on each row with various attributes in each column. This means no complicated pivots are necessary but I will need to make some minor tweaks. The dates are represented as strings and will need to be converted into date types. I will also add fields for what month the shooting occurred and the hour represented in decimal form.
+
+```{r tidy dates and times}
+df$OCCUR_DATE = as.Date(df$OCCUR_DATE, "%m/%d/%Y")
+df$Month = month(df$OCCUR_DATE)
+df$hour = as.numeric(df$OCCUR_TIME/3600)
+```
+
+## Analysis
+
+First, let's start with a basic histogram. 
+
+```{r all shootings histogram}
+hist(df$hour,breaks=24, probability=TRUE, xlab="Hour of Day", ylab="Probability", main="", xaxt="n")
+axis(1, at=c(0,5, 11, 17, 23))
+```
+
+A clarifying note on what is meant by probability: It does not mean the probability a shooting will occur in a particular hour. It means that if a shooting occurs, this is the probability distribution of what hour it will occur at.
+
+The results are remarkably sinusoidal, though it is interesting the there is a precipitous drop from the midnight peak but a gradual ascent throughout the day. Could it be that different types of shootings occur at different times of the day, such as premeditated murders occurring at night but random altercations or robberies during the day? The data contains a flag for whether or not a shooting is a murder. I shall use it to split the data into murders and non-murders and plot them together.
+
+```{r hist by murder}
+not_murders = df %>% filter(STATISTICAL_MURDER_FLAG==FALSE) %>% group_by(hour=floor(hour)) %>% summarize(n=n())
+not_murders$prob = not_murders$n/sum(not_murders$n)
+murders = df %>% filter(STATISTICAL_MURDER_FLAG==TRUE) %>% group_by(hour=floor(hour)) %>% summarize(n=n())
+murders$prob = murders$n/sum(murders$n)
+
+ggplot(murders, aes(x=hour, y=prob))+
+geom_line(aes(color="Murders"))+
+geom_line(data=not_murders, aes(y=prob, color="Not Murders"))+
+labs(title="Murders vs. Non Murders", x="Hour", y="Probability")
+```
+
+There appears to be no difference in the time distribution of murders and non-murder shootings. The murder line is slightly noisier due to a smaller sample size but is otherwise nearly identical. If the shape of the distribution is a result of a bias, we can safely eliminate this as a source.
+
+## Making a Model
+
+Having been unable to locate and account for what is causing the thick tail from hours 9 to 23, I will build a model as is. While a simple cosine function will likely not be a good fit, the data seems to resemble 2 normal distributions centered at 0 and 23, with the latter having a significantly thicker tail. I will attempt to model the distribution with an equation of the form:
+
+$$P(t) =A_1e^{\frac{-t^2}{b_1}} + A_2e^{\frac{-(t-23)^2}{b_2}}$$
+
+```{r Build the model}
+all_shootings = df %>% group_by(hour=floor(hour)) %>% summarize(n=n())
+n = sum(all_shootings$n)
+all_shootings$prob = all_shootings$n/n
+x = 0:23
+b = 16
+c = 40
+e1 = exp(((-x^2)/b))
+e2 = exp((-((x-23)^2)/c))
+fit = lm(all_shootings$prob ~ e1+e2)
+summary(fit)
+all_shootings$fitted=fitted(fit)
+all_shootings$resid=all_shootings$prob - all_shootings$fitted
+
+ggplot(all_shootings, aes(x=hour, y=prob))+
+geom_line(aes(color="Actual"))+
+geom_line(aes(y=fitted, color="Predicted"))+
+labs(title="Actual vs. Predicted", x="Hour", y="Probability")
+
+ggplot(all_shootings, aes(x=hour, y=resid))+
+geom_line(aes(color="Residuals"))+
+labs(title="Prediction Residuals", x="Hour", y="Residual")
+```
+
+An R-squared of 0.9581 is satisfactory though admittedly the constants related to the thickness of the two tails were picked via trial and error to maximize this value. The graph suggests that the fit tracks very closely to the data with the largest residual of about 0.014 occurring at 4am.
+
+## Bias
+
+### Aggregation
+
+An astute observer may have noticed that I omitted an obvious explanation for the thick tail during the daytime hours, which is the amount of daylight in a given day varies with the time of year. I will slice the data by month and compare December to July.
+```{r different plot}
+december = df %>% filter(Month==12) %>% group_by(hour=floor(hour)) %>% summarize(n=n())
+december$prob = december$n/sum(december$n)
+july = df %>% filter(Month==7) %>% group_by(hour=floor(hour)) %>% summarize(n=n())
+july$prob = july$n/sum(july$n)
+
+ggplot(july, aes(x=hour, y=prob))+
+geom_line(aes(color="July"))+
+geom_line(data=december, aes(y=prob, color="December"))+
+labs(title="December vs. July", x="Hour", y="Probability")
+```
+
+From this we can see that shooting incidents in the summer are compressed into the fewer nighttime hours, resulting in higher nighttime peaks and thinner daytime tails while the reverse is true for the winter. This means the model will under- or over-estimate values depending on the month and hour. Trying to account for this in the model became sufficiently complicated and required enough dubious massaging of the data that I felt it was beyond the scope of this exercise and to leave it as a known bias.
+
+### Lack of Context
+
+Violent crime is an inherently social phenomenon and involves many elements that are not captured by the purely physical description of the events present in the data (date, time, location, identity of victim and perpetrator). 2020 - 2022 had several disrupting events (George Floyd protests, COVID-19 and lockdowns), not to mention possible local events that were less well-reported, that can greatly alter trends in the data but the data itself could offer no explanation why this is the case and can lead to any number of spurious correlations in an attempt to find an answer that isn't there.
+
+## Conclusion
+
+We have a well-fitting model that shows that shootings at peak at midnight and drop to their minimums between 7 and 9 am. While we have identified a bias in the model that will cause it to over or under-estimate depending on month of the year, it is not severe enough to overturn the conclusion.

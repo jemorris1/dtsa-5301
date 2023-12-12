@@ -1,0 +1,108 @@
+---
+title: "COVID-19 Data Analysis"
+author: "John Morris"
+date: "2023-12-10"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Purpose
+
+It was thought the UV radiation of sunlight was able to prevent or slow COVID19 transmission outdoors. Since lower latitudes longer and warmer winter days than northern latitudes, making it more likely for people to be outside, is it possible to identify any correlation between the latitude of a US county and its cases or deaths per 1000 people for the year 2022? The scope was limited to 2022 because most or all counties would have dropped their COVID-related restrictions, whereas prior to this it was highly variable from county to county. Limiting to 2022 also minimizes the number of virus variants, which could have different properties related to virality and lethality.
+
+## Libraries
+
+Tidyverse is the only library that will be required for this exercise.
+``` {r tidyverse, message=FALSE}
+library(tidyverse)
+```
+
+## Load and Tidy Data
+
+First, acquire the most recent COVID19 data from the Johns Hopkins github repository. Since this analysis is constrained to the United States, the global data will not be necessary.
+
+``` {r download data, message=FALSE}
+ deaths = read_csv("https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv")
+cases = read_csv("https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv")
+head(deaths)
+```
+Because the data for each day is cumulative, we can find the total deaths and cases for 2022 by simply subtracting the value at the beginning of the year from the end, circumventing the need to pivot, filter, calculate the value per day, group and sum. To get everything in a workable form I will isolate the county information then join the 2022 total cases and deaths to it.
+
+``` {r group county attributes, message=FALSE}
+df = deaths[c("Combined_Key","Population","Lat")]
+cases$cases = cases$"12/31/22" - cases$"1/1/22"
+deaths$deaths = deaths$"12/31/22" - deaths$"1/1/22"
+df = full_join(df, cases[c("Combined_Key","cases")]) %>% full_join(deaths[c("Combined_Key","deaths")])
+head(df)
+```
+## Analysis
+
+First, lets have a look at the latitude distribution of the counties.
+
+``` {r lat hist}
+hist(df$Lat,breaks=24, xlab="Latitude", ylab="Proportion of Counties", main="")
+```
+
+The majority of counties are tightly clustered around 40 degrees latitude.
+
+Currently the data is not scaled by population so I will add calculated columns for cases and deaths per 1000 people and plot those against latitude.
+``` {r cases plot, message=FALSE}
+df = filter(df, Population > 0)
+df$cases_per_1000 = 1000*df$cases/df$Population
+df$deaths_per_1000 = 1000*df$deaths/df$Population
+ggplot(df, aes(x=Lat, y=cases_per_1000))+
+geom_point(aes(color="Cases per 1000"))+
+labs(title="COVID19 Cases By Latitude", x="Latitude", y="Cases per 1000")
+```
+
+While there are several outliers, the cases per 1000 appears to cluster around 200 regardless of latitude which suggests little or no correlation. Let's build a model to verify.
+
+```{r cases model}
+cases_fit = lm(df$cases_per_1000 ~ df$Lat)
+summary(cases_fit)
+```
+
+
+```{r graph with fit, message=FALSE, warnings=FALSE}
+
+df$pred_cases=fitted(cases_fit)
+ggplot(df, aes(x=Lat, y=cases_per_1000))+
+geom_point(aes(color="Cases per 1000"))+
+geom_line(aes(y=pred_cases, color="Predicted"))+
+ylim(0, 500)+
+labs(title="COVID19 Cases By Latitude", x="Latitude", y="Cases per 1000")
+```
+
+As expected, our fit is a nearly flat line, with R-squared near zero. Let's have a look at the residuals just for good measure.
+
+```{r cases residuals}
+df$resid_cases = df$cases_per_1000 - df$pred_cases
+ggplot(df, aes(x=Lat, y=resid_cases))+
+geom_point(aes(color="Residuals"))+
+labs(title="COVID19 Cases By Latitude", x="Latitude", y="Residuals")
+```
+
+In a good fit we would hope to see a straight line tightly clustered around 0 but in this case the fit is so bad it is hard to distinguish from the original graph. Let's repeat the process for deaths and see if the results are any better.
+
+```{r deaths modeling}
+deaths_fit = lm(df$deaths_per_1000 ~ df$Lat)
+summary(deaths_fit)
+df$pred_deaths=fitted(deaths_fit)
+
+ggplot(df, aes(x=Lat, y=deaths_per_1000))+
+geom_point(aes(color="Deaths per 1000"))+
+geom_line(aes(y=pred_deaths, color="Predicted"))+
+labs(title="COVID19 Deaths By Latitude", x="Latitude", y="Cases per 1000")
+```
+
+The fit for deaths is even worse.
+
+## Conclusion and Biases
+
+We can safely conclude that there is no correlation between the latitude of a county and either the cases or deaths per 1000 people. There are some notable flaws in the model that may introduce bias. Since viral transmission requires multiple people it would have been better to normalize cases and deaths by population per square mile rather than total population. Additionally, the tight clustering of latitude values means we did not have a good spread of values across a range of latitudes which could have negatively affected the model. Finally, southern states tend to have lower incomes which could affect their access to healthcare and could skew the data particularly deaths. That said, it is difficult to imagine any of these factors overturning the conclusion which is the lack of correlation between latitude and cases/deaths.
